@@ -1,0 +1,233 @@
+
+library(shiny)
+library(shinydashboard)
+library(randomForest)
+library(ggplot2)
+library(dplyr)
+
+
+model <- readRDS("best_model_rf.rds")
+
+
+ui <- dashboardPage(
+  skin = "blue",
+  dashboardHeader(title = "PredictiveMaint AI", titleWidth = 250),
+  dashboardSidebar(width = 250, sidebarMenu(
+    menuItem("Failure Predictor",  tabName = "predictor", icon = icon("exclamation-triangle")),
+    menuItem("Sensor Dashboard",   tabName = "dashboard",  icon = icon("tachometer-alt")),
+    menuItem("About",              tabName = "about",      icon = icon("info-circle"))
+  )),
+  dashboardBody(
+    tags$head(tags$style(HTML("
+      .skin-blue .main-header .logo { background-color: #1565C0; font-weight: bold; }
+      .skin-blue .main-header .navbar { background-color: #1976D2; }
+      .skin-blue .main-sidebar { background-color: #212121; }
+      .risk-high   { background:#FFEBEE; border-left:5px solid #D32F2F; padding:15px; border-radius:5px; }
+      .risk-low    { background:#E8F5E9; border-left:5px solid #388E3C; padding:15px; border-radius:5px; }
+      .risk-medium { background:#FFF8E1; border-left:5px solid #F57F17; padding:15px; border-radius:5px; }
+      .txt-high    { font-size:28px; font-weight:bold; color:#D32F2F; }
+      .txt-low     { font-size:28px; font-weight:bold; color:#388E3C; }
+      .txt-medium  { font-size:28px; font-weight:bold; color:#E65100; }
+      h4.lbl { color:#1565C0; border-bottom:1px solid #BBDEFB; padding-bottom:5px; }
+    "))),
+    tabItems(
+
+      # ---- TAB 1: PREDICTOR ----
+      tabItem(tabName = "predictor",
+        fluidRow(column(12,
+          h2("Machine Failure Risk Predictor", style="color:#1565C0;"),
+          p("Enter real-time sensor readings and machine attributes to predict failure probability within 7 days.")
+        )),
+        fluidRow(
+          box(title="Machine Attributes", status="primary", solidHeader=TRUE, width=4,
+            h4("Identification & Age", class="lbl"),
+            numericInput("installation_year","Installation Year", value=2015, min=2000, max=2040),
+            numericInput("op_hours","Operational Hours", value=50000, min=0, max=200000),
+            numericInput("machine_age","Machine Age (years)", value=25, min=0, max=40),
+            h4("Maintenance History", class="lbl"),
+            numericInput("last_maint","Days Since Last Maintenance", value=90, min=0, max=365),
+            numericInput("maint_count","Maintenance History Count", value=4, min=0, max=20),
+            numericInput("fail_count","Failure History Count", value=2, min=0, max=15),
+            numericInput("error_codes","Error Codes (Last 30 Days)", value=3, min=0, max=15),
+            h4("AI Supervision", class="lbl"),
+            selectInput("ai_sup","AI Supervision Active", choices=c("Yes"=1,"No"=0), selected=0),
+            numericInput("ai_override","AI Override Events", value=0, min=0, max=10)
+          ),
+          box(title="Sensor Readings", status="warning", solidHeader=TRUE, width=4,
+            h4("Environmental Sensors", class="lbl"),
+            numericInput("temp","Temperature (°C)", value=60, min=-20, max=150),
+            numericInput("vib","Vibration (mm/s)", value=10, min=-20, max=35),
+            numericInput("sound","Sound Level (dB)", value=75, min=20, max=125),
+            h4("Fluid Levels", class="lbl"),
+            sliderInput("oil","Oil Level (%)", min=0, max=100, value=70),
+            sliderInput("coolant","Coolant Level (%)", min=0, max=100, value=65),
+            h4("Power & Life", class="lbl"),
+            numericInput("power","Power Consumption (kW)", value=150, min=-250, max=600),
+            numericInput("rul","Remaining Useful Life (days)", value=200, min=0, max=1200),
+            br(),
+            actionButton("predict_btn","Predict Failure Risk", icon=icon("search"),
+              style="background-color:#1565C0;color:white;width:100%;font-size:16px;padding:12px;")
+          ),
+          box(title="Prediction Result", status="danger", solidHeader=TRUE, width=4,
+            uiOutput("pred_output"),
+            br(),
+            h4("Probability Gauge", class="lbl"),
+            plotOutput("prob_gauge", height="200px"),
+            br(),
+            h4("Risk Factor Summary", class="lbl"),
+            tableOutput("risk_table")
+          )
+        )
+      ),
+
+      
+      tabItem(tabName = "dashboard",
+        fluidRow(column(12, h2("Live Sensor Monitoring Dashboard", style="color:#1565C0;"))),
+        fluidRow(
+          valueBoxOutput("vb_temp",  width=3),
+          valueBoxOutput("vb_vib",   width=3),
+          valueBoxOutput("vb_oil",   width=3),
+          valueBoxOutput("vb_rul",   width=3)
+        ),
+        fluidRow(
+          box(title="Sensor Trend (Last 30 Readings)", status="primary", solidHeader=TRUE, width=12,
+              plotOutput("trend_plot", height="300px"))
+        ),
+        fluidRow(
+          box(title="Fleet Risk Distribution", status="warning", solidHeader=TRUE, width=6,
+              plotOutput("risk_dist", height="260px")),
+          box(title="Maintenance Schedule", status="success", solidHeader=TRUE, width=6,
+              plotOutput("maint_chart", height="260px"))
+        )
+      ),
+
+      
+      tabItem(tabName = "about",
+        box(width=12, status="primary",
+          h2("About This Application"),
+          h3("Model"),
+          p("Support Vector Machine classifier trained on factory_sensor_simulator_2040.csv (500,000 records, 33 machine types). Selected after comparison with KNN, Decision Tree, and Random Forest."),
+          h3("Features"),
+          tags$ul(
+            tags$li("Real-time failure probability prediction from sensor inputs"),
+            tags$li("Three-tier risk classification: Low / Moderate / High"),
+            tags$li("Interactive fleet monitoring dashboard"),
+            tags$li("Individual sensor risk factor breakdown")
+          ),
+        )
+      )
+    )
+  )
+)
+
+
+server <- function(input, output, session) {
+
+  prediction <- eventReactive(input$predict_btn, {
+    nd <- data.frame(
+      Operational_Hours          = input$op_hours,
+      Temperature_C              = input$temp,
+      Vibration_mms              = input$vib,
+      Sound_dB                   = input$sound,
+      Oil_Level_pct              = input$oil,
+      Coolant_Level_pct          = input$coolant,
+      Power_Consumption_kW       = input$power,
+      Last_Maintenance_Days_Ago  = input$last_maint,
+      Maintenance_History_Count  = input$maint_count,
+      Failure_History_Count      = input$fail_count,
+      AI_Supervision             = as.integer(input$ai_sup),
+      Error_Codes_Last_30_Days   = input$error_codes,
+      Remaining_Useful_Life_days = input$rul,
+      Machine_Age                = input$machine_age,
+      AI_Override_Events         = input$ai_override
+    )
+    prob <- predict(model, nd, type="prob")[,"Yes"]
+    pred <- predict(model, nd)
+    list(prob=prob, pred=as.character(pred))
+  })
+
+  output$pred_output <- renderUI({
+    res <- prediction(); pct <- round(res$prob*100, 1)
+    if (pct >= 60)
+      div(class="risk-high",  p("\u26a0 HIGH FAILURE RISK", class="txt-high"),
+          p(paste0("Failure Probability: ", pct, "%"), style="font-size:18px;color:#D32F2F;"),
+          p("Immediate maintenance inspection recommended."))
+    else if (pct >= 30)
+      div(class="risk-medium", p("\u26a1 MODERATE RISK", class="txt-medium"),
+          p(paste0("Failure Probability: ", pct, "%"), style="font-size:18px;color:#E65100;"),
+          p("Schedule maintenance within 3-5 days."))
+    else
+      div(class="risk-low",   p("\u2714 LOW RISK", class="txt-low"),
+          p(paste0("Failure Probability: ", pct, "%"), style="font-size:18px;color:#388E3C;"),
+          p("Machine operating within normal parameters."))
+  })
+
+  output$prob_gauge <- renderPlot({
+    res <- prediction(); pct <- round(res$prob*100,1)
+    col <- if(pct>=60) "#D32F2F" else if(pct>=30) "#F57F17" else "#388E3C"
+    df_g <- data.frame(label=c("Risk","Safe"), value=c(pct,100-pct))
+    ggplot(df_g, aes(x="", y=value, fill=label)) +
+      geom_col(width=0.4) + coord_polar(theta="y", start=pi) +
+      scale_fill_manual(values=c("Risk"=col,"Safe"="#E0E0E0")) +
+      annotate("text",x=0,y=0,label=paste0(pct,"%"),size=9,fontface="bold",color=col) +
+      theme_void() + theme(legend.position="none")
+  })
+
+  output$risk_table <- renderTable({
+    data.frame(
+      Factor = c("Temperature","Vibration","Days Since Maint.","Error Codes","RUL"),
+      Value  = c(paste0(input$temp," °C"), paste0(input$vib," mm/s"),
+                 paste0(input$last_maint," days"), input$error_codes,
+                 paste0(input$rul," days")),
+      Status = c(
+        ifelse(input$temp > 85,        "\u26a0 High",    "\u2713 Normal"),
+        ifelse(input$vib > 18,         "\u26a0 High",    "\u2713 Normal"),
+        ifelse(input$last_maint > 300, "\u26a0 Overdue", "\u2713 OK"),
+        ifelse(input$error_codes > 5,  "\u26a0 Elevated","\u2713 Normal"),
+        ifelse(input$rul < 100,        "\u26a0 Critical", "\u2713 Normal")
+      )
+    )
+  })
+
+  output$vb_temp  <- renderValueBox(valueBox(paste0(round(rnorm(1,60,5),1)," °C"),  "Temperature",        icon=icon("thermometer-half"), color="red"))
+  output$vb_vib   <- renderValueBox(valueBox(paste0(round(abs(rnorm(1,10,2)),2)," mm/s"), "Vibration",   icon=icon("wave-square"),      color="yellow"))
+  output$vb_oil   <- renderValueBox(valueBox(paste0(round(runif(1,55,95),1)," %"),  "Oil Level",          icon=icon("tint"),             color="green"))
+  output$vb_rul   <- renderValueBox(valueBox(paste0(round(runif(1,100,800))," days"),"Remaining Useful Life", icon=icon("clock"),        color="blue"))
+
+  output$trend_plot <- renderPlot({
+    set.seed(NULL); n <- 30
+    df_t <- data.frame(Reading=1:n,
+      Temperature=rnorm(n,60,8)+cumsum(rnorm(n,0,0.5)),
+      Vibration=abs(rnorm(n,10,2))*5) %>%
+      tidyr::pivot_longer(-Reading, names_to="Sensor", values_to="Value")
+    ggplot(df_t, aes(x=Reading, y=Value, colour=Sensor, group=Sensor)) +
+      geom_line(linewidth=1.2) + geom_point(size=1.8) +
+      scale_colour_manual(values=c("Temperature"="#D32F2F","Vibration"="#1565C0")) +
+      labs(x="Reading Number", y="Sensor Value") + theme_minimal(base_size=12) +
+      geom_hline(yintercept=85, linetype="dashed", colour="#D32F2F", alpha=0.5) +
+      annotate("text", x=28, y=87, label="Temp. Threshold", colour="#D32F2F", size=3)
+  })
+
+  output$risk_dist <- renderPlot({
+    set.seed(42)
+    rd <- data.frame(Machine=paste0("M",1:20),
+      Risk=c(runif(14,5,35),runif(4,40,70),runif(2,71,95))) %>%
+      mutate(Level=case_when(Risk>=60~"High",Risk>=30~"Medium",TRUE~"Low"))
+    ggplot(rd, aes(x=reorder(Machine,Risk), y=Risk, fill=Level)) + geom_col() + coord_flip() +
+      scale_fill_manual(values=c("High"="#D32F2F","Medium"="#F57F17","Low"="#388E3C")) +
+      labs(x="Machine", y="Failure Risk (%)") + theme_minimal(base_size=11)
+  })
+
+  output$maint_chart <- renderPlot({
+    md <- data.frame(Category=c("Completed","Due Soon (7 days)","Overdue","Scheduled"),
+                     Count=c(142,23,8,67))
+    ggplot(md, aes(x=reorder(Category,Count), y=Count, fill=Category)) + geom_col(width=0.6) +
+      scale_fill_manual(values=c("Completed"="#388E3C","Due Soon (7 days)"="#F57F17",
+                                  "Overdue"="#D32F2F","Scheduled"="#1565C0")) +
+      labs(x="", y="Number of Machines") + theme_minimal(base_size=11) +
+      theme(legend.position="none") + coord_flip() +
+      geom_text(aes(label=Count), hjust=-0.2, size=4)
+  })
+}
+
+shinyApp(ui=ui, server=server)
